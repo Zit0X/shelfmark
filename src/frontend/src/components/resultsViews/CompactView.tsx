@@ -1,12 +1,11 @@
 import { useState } from 'react';
 
-import { useSearchMode } from '../../contexts/SearchModeContext';
 import type { Book, ButtonStateInfo } from '../../types';
-import { getDownloadsCount } from '../../types';
+import { getDownloadsCount, isMetadataBook } from '../../types';
 import { bookSupportsTargets } from '../../utils/bookTargetLoader';
 import { BookActionButton } from '../BookActionButton';
 import { BookTargetDropdown } from '../BookTargetDropdown';
-import { DisplayFieldBadges, DisplayFieldIcon } from '../shared';
+import { DisplayFieldBadges, DisplayFieldIcon, SourcesBadge } from '../shared';
 
 const SkeletonLoader = () => (
   <div className="h-full w-full animate-pulse bg-linear-to-r from-gray-300 via-gray-200 to-gray-300 dark:from-gray-700 dark:via-gray-600 dark:to-gray-700" />
@@ -35,7 +34,6 @@ export const CompactView = ({
   showSeriesPosition = false,
   onShowToast,
 }: CompactViewProps) => {
-  const { searchMode } = useSearchMode();
   const [isLoadingDetails, setIsLoadingDetails] = useState(false);
   const [isLoadingReleases, setIsLoadingReleases] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
@@ -190,13 +188,14 @@ export const CompactView = ({
             {book.title || 'Untitled'}
           </h3>
           <p className="min-w-0 truncate text-xs opacity-80">{book.author || 'Unknown author'}</p>
-          <div className="text-xs opacity-70">
+          <div className="flex items-center gap-1.5 text-xs opacity-70">
             <span>{book.year || '-'}</span>
+            <SourcesBadge book={book} />
           </div>
         </div>
 
         <div className="mt-auto flex flex-col gap-2">
-          {searchMode === 'universal' && book.display_fields && book.display_fields.length > 0 ? (
+          {isMetadataBook(book) && book.display_fields && book.display_fields.length > 0 ? (
             <>
               <DisplayFieldBadges
                 fields={book.display_fields.filter(

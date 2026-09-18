@@ -1166,6 +1166,12 @@ def api_config() -> Response | tuple[Response, int]:
             "supported_formats": app_config.SUPPORTED_FORMATS,
             "supported_audiobook_formats": app_config.SUPPORTED_AUDIOBOOK_FORMATS,
             "search_mode": search_mode,
+            "direct_mode_metadata_fallback_enabled": app_config.get(
+                "DIRECT_MODE_METADATA_FALLBACK_ENABLED", False
+            ),
+            "direct_mode_fallback_strategy": app_config.get(
+                "DIRECT_MODE_FALLBACK_STRATEGY", "on_empty_or_error"
+            ),
             "metadata_sort_options": get_provider_sort_options(metadata_ui_provider),
             "metadata_search_fields": get_provider_search_fields(metadata_ui_provider),
             "default_release_source": default_release_source,
@@ -3091,6 +3097,264 @@ def api_releases() -> Response | tuple[Response, int]:
         return jsonify({"error": str(e)}), 503
     except _IMPORT_OPERATIONAL_ERRORS as e:
         logger.error_trace(f"Releases search error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+def _coerce_positive_float(value: object, default: float) -> float:
+    """Read a numeric config value defensively, same guard style as search_deadline."""
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return default
+    try:
+        result = float(value)
+    except TypeError, ValueError:
+        return default
+    return result if result > 0 else default
+
+
+def _coerce_positive_int(value: object, default: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return default
+    try:
+        result = int(float(value))
+    except TypeError, ValueError:
+        return default
+    return result if result > 0 else default
+
+
+def _release_to_dedup_proxy(release: Release) -> BookMetadata:
+    """A minimal `BookMetadata` stand-in for a `Release`, for cross-matching only.
+
+    Used by `api_direct_search` to detect when a discovery-only result (from a
+    metadata provider) is the same book as a release Direct Download already found,
+    so it isn't shown twice. Never returned to the frontend.
+    """
+    from shelfmark.metadata_providers import BookMetadata
+
+    extra = release.extra or {}
+    author = extra.get("author")
+    authors = [author] if isinstance(author, str) and author.strip() else []
+
+    publish_year = None
+    year_value = extra.get("year")
+    if isinstance(year_value, int):
+        publish_year = year_value
+    elif isinstance(year_value, str) and year_value.strip().isdigit():
+        publish_year = int(year_value.strip())
+
+    publisher = extra.get("publisher")
+
+    return BookMetadata(
+        provider="direct_download",
+        provider_id=release.source_id,
+        title=release.title,
+        authors=authors,
+        publisher=publisher if isinstance(publisher, str) else None,
+        publish_year=publish_year,
+        language=release.language,
+        source_url=release.info_url or release.download_url,
+    )
+
+
+@app.route("/api/direct-search", methods=["GET"])
+@login_required
+def api_direct_search() -> Response | tuple[Response, int]:
+    """Direct mode search enriched with a metadata-provider discovery fallback.
+
+    Searches the Direct Download source (Anna's Archive and any other registered
+    direct-download provider) exactly as `/api/releases?source=direct_download` does,
+    and - only when DIRECT_MODE_METADATA_FALLBACK_ENABLED is on - also searches
+    enabled metadata providers (Open Library, Google Books, Hardcover) for
+    discovery-only results. Results are merged/deduplicated (see
+    `shelfmark.core.metadata_dedup`) so a book found by more than one source is shown
+    once. Discovery results have no download source of their own; the frontend opens
+    them through the normal /api/releases?provider=<x>&book_id=<y> flow, which already
+    searches every enabled release source (Source Priority) - unchanged by this route.
+
+    Returns 404 when the feature flag is disabled: the frontend falls back to
+    /api/releases?source=direct_download in that case, which this route never touches.
+
+    Query Parameters: same browse filters as /api/releases's Direct-mode branch
+    (query, isbn, author, title, lang, content, format, sort).
+    """
+    if not app_config.get("DIRECT_MODE_METADATA_FALLBACK_ENABLED", False):
+        return jsonify({"error": "Direct mode metadata fallback is not enabled"}), 404
+
+    try:
+        from dataclasses import asdict
+
+        from shelfmark.core import metadata_dedup, metadata_orchestrator
+        from shelfmark.core.query_normalization import build_progressive_queries
+        from shelfmark.core.search_plan import build_release_search_plan
+        from shelfmark.core.utils import transform_cover_url
+        from shelfmark.release_sources import get_source
+
+        query_text = request.args.get("query", "").strip()
+        browse_filters = _parse_search_filters_from_request()
+        db_user_id = get_session_db_user_id(session)
+
+        title_values = [v.strip() for v in (browse_filters.title or []) if str(v).strip()]
+        author_values = [v.strip() for v in (browse_filters.author or []) if str(v).strip()]
+        isbn_values = [v.strip() for v in (browse_filters.isbn or []) if str(v).strip()]
+
+        book = _build_source_query_book(query_text, browse_filters)
+        plan = build_release_search_plan(
+            book,
+            languages=browse_filters.lang,
+            manual_query=query_text,
+            source_filters=browse_filters,
+            user_id=db_user_id,
+        )
+
+        warmup.note_user_search()
+
+        direct_releases: list[Release] = []
+        direct_error: str | None = None
+
+        with search_deadline.search_deadline():
+            logger.info("direct search source=direct_download started")
+            try:
+                direct_source = get_source("direct_download")
+                direct_releases = direct_source.search(
+                    book, plan, expand_search=False, content_type="ebook"
+                )
+            except SourceUnavailableError as exc:
+                direct_error = str(exc)
+            except _OPERATIONAL_ERRORS as exc:
+                logger.warning("Direct Download search failed: %s", exc)
+                direct_error = str(exc)
+            logger.info(
+                "direct search source=direct_download completed results=%d error=%s",
+                len(direct_releases),
+                direct_error or "none",
+            )
+
+            strategy = app_config.get("DIRECT_MODE_FALLBACK_STRATEGY", "on_empty_or_error")
+            run_metadata_fallback = strategy == "parallel" or not direct_releases
+            logger.info(
+                "direct search strategy=%s metadata_fallback=%s",
+                strategy,
+                "run" if run_metadata_fallback else "skip",
+            )
+
+            discovery_books: list[BookMetadata] = []
+            provider_statuses: list[metadata_orchestrator.ProviderStatus] = []
+
+            if run_metadata_fallback:
+                steps = build_progressive_queries(
+                    query_text,
+                    title=title_values[0] if title_values else None,
+                    author=author_values[0] if author_values else None,
+                    isbn=isbn_values[0] if isbn_values else None,
+                )
+                if steps:
+                    timeout_seconds = _coerce_positive_float(
+                        app_config.get("DIRECT_MODE_METADATA_TIMEOUT_SECONDS", 8), 8.0
+                    )
+                    limit_per_provider = _coerce_positive_int(
+                        app_config.get("DIRECT_MODE_METADATA_MAX_RESULTS_PER_PROVIDER", 20), 20
+                    )
+                    discovery_result = metadata_orchestrator.discover_books(
+                        steps,
+                        limit_per_provider=limit_per_provider,
+                        timeout_seconds=timeout_seconds,
+                        language=browse_filters.lang[0] if browse_filters.lang else None,
+                    )
+                    discovery_books = discovery_result.books
+                    provider_statuses = discovery_result.provider_statuses
+                    for status in provider_statuses:
+                        if status.status in ("disabled", "not_configured"):
+                            logger.info(
+                                "provider=%s skipped reason=%s",
+                                status.name,
+                                status.status,
+                            )
+                        else:
+                            logger.info(
+                                "provider=%s status=%s results=%d",
+                                status.name,
+                                status.status,
+                                status.count,
+                            )
+                else:
+                    logger.info("direct search metadata_orchestrator skipped reason=no_query_steps")
+            else:
+                logger.info(
+                    "direct search metadata_orchestrator skipped reason=strategy_%s",
+                    strategy,
+                )
+
+        combined_for_merge = [
+            _release_to_dedup_proxy(release) for release in direct_releases
+        ] + discovery_books
+        merged = metadata_dedup.merge_results(combined_for_merge) if combined_for_merge else []
+        logger.info(
+            "direct search merge candidates=%d merged=%d",
+            len(combined_for_merge),
+            len(merged),
+        )
+
+        discovery_data: list[dict[str, Any]] = []
+        for merged_book in merged:
+            if any(ref.provider == "direct_download" for ref in merged_book.sources):
+                # Already represented in `releases` below - do not show it twice.
+                continue
+            book_dict = asdict(merged_book.book)
+            book_dict.pop("raw_provider_metadata", None)
+            if book_dict.get("cover_url"):
+                cache_id = f"{merged_book.book.provider}_{merged_book.book.provider_id}"
+                book_dict["cover_url"] = transform_cover_url(book_dict["cover_url"], cache_id)
+            book_dict["sources"] = [
+                {
+                    "provider": ref.provider,
+                    "provider_id": ref.provider_id,
+                    "provider_display_name": ref.provider_display_name,
+                    "source_url": ref.source_url,
+                }
+                for ref in merged_book.sources
+            ]
+            book_dict["match_basis"] = merged_book.match_basis
+            book_dict["relevance_score"] = merged_book.relevance_score
+            discovery_data.append(book_dict)
+
+        provider_statuses_payload = [
+            {
+                "name": status.name,
+                "display_name": status.display_name,
+                "status": status.status,
+                "message": status.message,
+                "count": status.count,
+            }
+            for status in provider_statuses
+        ]
+        provider_statuses_payload.insert(
+            0,
+            {
+                "name": "direct_download",
+                "display_name": get_source_display_name("direct_download"),
+                "status": "ok" if direct_releases else ("error" if direct_error else "no_results"),
+                "message": direct_error,
+                "count": len(direct_releases),
+            },
+        )
+
+        releases_data = [_serialize_release(release) for release in direct_releases]
+        logger.info(
+            "direct search completed releases=%d discovery=%d",
+            len(releases_data),
+            len(discovery_data),
+        )
+
+        return jsonify(
+            {
+                "releases": releases_data,
+                "discovery": discovery_data,
+                "book": asdict(book),
+                "sources_searched": ["direct_download"],
+                "provider_statuses": provider_statuses_payload,
+            }
+        )
+    except _IMPORT_OPERATIONAL_ERRORS as e:
+        logger.error_trace(f"Direct search error: {e}")
         return jsonify({"error": str(e)}), 500
 
 

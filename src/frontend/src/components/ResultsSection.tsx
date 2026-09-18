@@ -3,7 +3,9 @@ import { useState } from 'react';
 import { useSearchMode } from '../contexts/SearchModeContext';
 import { SORT_OPTIONS } from '../data/filterOptions';
 import { useMediaQuery } from '../hooks/useMediaQuery';
-import type { Book, ButtonStateInfo, SortOption } from '../types';
+import type { Book, ButtonStateInfo, DirectSearchProviderStatus, SortOption } from '../types';
+import { isDiscoveryOnlyBook } from '../types';
+import { DirectSearchStatusBanner } from './DirectSearchStatusBanner';
 import { Dropdown } from './Dropdown';
 import { CardView } from './resultsViews/CardView';
 import { CompactView } from './resultsViews/CompactView';
@@ -35,6 +37,8 @@ interface ResultsSectionProps {
   totalFound?: number;
   onShowToast?: (message: string, type: 'success' | 'error' | 'info') => void;
   resultsSourceUrl?: string;
+  // Direct mode metadata fallback: per-provider outcome, when it ran.
+  providerStatuses?: DirectSearchProviderStatus[];
 }
 
 export const ResultsSection = ({
@@ -55,6 +59,7 @@ export const ResultsSection = ({
   totalFound,
   onShowToast,
   resultsSourceUrl,
+  providerStatuses,
 }: ResultsSectionProps) => {
   const { searchMode } = useSearchMode();
   const activeViewClasses =
@@ -88,6 +93,9 @@ export const ResultsSection = ({
 
   return (
     <section id="results-section" className="mb-4 w-full sm:mb-8">
+      {providerStatuses && providerStatuses.length > 0 && (
+        <DirectSearchStatusBanner providerStatuses={providerStatuses} />
+      )}
       <div className="relative z-10 mb-2 flex items-center justify-between sm:mb-3">
         {showSortControl && (
           <SortControl
@@ -217,9 +225,12 @@ export const ResultsSection = ({
           {books.map((book, index) => {
             const shouldUseCardLayout = isDesktop && viewMode === 'card';
             const animationDelay = index * 50;
-            // Use appropriate button state function based on search mode
+            // Use appropriate button state function based on search mode - or, for a
+            // Direct-mode discovery result (no release of its own, found by a metadata
+            // provider), the same tracking Universal mode uses, since it goes through
+            // the same "search release sources" flow (see BookActionButton).
             const buttonState =
-              searchMode === 'universal'
+              searchMode === 'universal' || isDiscoveryOnlyBook(book)
                 ? getUniversalButtonState(book.id)
                 : getButtonState(book.id);
 

@@ -17,6 +17,7 @@ This document lists all configuration options that can be set via environment va
 - [Prowlarr](#prowlarr)
 - [Newznab](#newznab)
 - [AudiobookBay](#audiobookbay)
+- [Libgen Search](#libgen-search)
 - [IRC](#irc)
 - [Download Clients](#download-clients)
 - [Metadata Providers](#metadata-providers)
@@ -248,7 +249,6 @@ Seconds since the last WireGuard handshake before the healthcheck bounces the tu
 | `AUDIOBOOK_LIBRARY_URL` | Adds a separate navigation button for your audiobook library (Audiobookshelf, Plex, etc). When both URLs are set, icons are shown instead of text. | string | _none_ |
 | `SUPPORTED_FORMATS` | Book formats to include in search results. ZIP/RAR archives are extracted automatically and book files are used if found. | string (comma-separated) | `epub,mobi,azw3,fb2,djvu,cbz,cbr` |
 | `SUPPORTED_AUDIOBOOK_FORMATS` | Audiobook formats to include in search results. ZIP/RAR archives are extracted automatically and audiobook files are used if found. | string (comma-separated) | `m4b,mp3,m4a,mp4,flac,ogg,wma,aac,wav,opus,zip,rar` |
-| `BOOK_LANGUAGE` | Default language filter for searches. | string (comma-separated) | `en` |
 
 <details>
 <summary>Detailed descriptions</summary>
@@ -307,6 +307,10 @@ Audiobook formats to include in search results. ZIP/RAR archives are extracted a
 | `SEARCH_MODE` | How you want to search for and download books. | string (choice) | `universal` |
 | `BOOK_LANGUAGE` | Default language filter for searches. Users can override this for their own account. | string (comma-separated) | `en` |
 | `AA_DEFAULT_SORT` | Default sort order for search results. | string (choice) | `relevance` |
+| `DIRECT_MODE_METADATA_FALLBACK_ENABLED` | Only providers you've separately enabled and configured below (Open Library, Google Books, Hardcover, ...) participate - this switch does not enable any provider by itself, and no provider is queried unless this is on. | boolean | `false` |
+| `DIRECT_MODE_FALLBACK_STRATEGY` | When to query metadata providers relative to Anna's Archive. | string (choice) | `on_empty_or_error` |
+| `DIRECT_MODE_METADATA_TIMEOUT_SECONDS` | Maximum time to wait for each metadata provider before treating it as unavailable for that search. | number | `8` |
+| `DIRECT_MODE_METADATA_MAX_RESULTS_PER_PROVIDER` | Maximum number of discovery results to request from each metadata provider. | number | `20` |
 | `SHOW_RELEASE_SOURCE_LINKS` | Show clickable release-source links in release and details modals. Metadata provider links stay enabled. | boolean | `true` |
 | `SHOW_COMBINED_SELECTOR` | Show the option to search for and download both a book and audiobook together. | boolean | `true` |
 | `FORCE_COMBINED_SEARCH` | Force combined search whenever it's available. Locks the combined toggle on. | boolean | `false` |
@@ -347,6 +351,45 @@ Default sort order for search results.
 - **Type:** string (choice)
 - **Default:** `relevance`
 - **Options:** `relevance` (Most relevant), `newest` (Newest (publication year)), `oldest` (Oldest (publication year)), `largest` (Largest (filesize)), `smallest` (Smallest (filesize)), `newest_added` (Newest (open sourced)), `oldest_added` (Oldest (open sourced))
+
+#### `DIRECT_MODE_METADATA_FALLBACK_ENABLED`
+
+**Enable Metadata Provider Fallback**
+
+Only providers you've separately enabled and configured below (Open Library, Google Books, Hardcover, ...) participate - this switch does not enable any provider by itself, and no provider is queried unless this is on.
+
+- **Type:** boolean
+- **Default:** `false`
+
+#### `DIRECT_MODE_FALLBACK_STRATEGY`
+
+**Fallback Strategy**
+
+When to query metadata providers relative to Anna's Archive.
+
+- **Type:** string (choice)
+- **Default:** `on_empty_or_error`
+- **Options:** `on_empty_or_error` (Only when Anna's Archive fails or finds nothing), `parallel` (Always, in parallel with Anna's Archive)
+
+#### `DIRECT_MODE_METADATA_TIMEOUT_SECONDS`
+
+**Metadata Provider Timeout (seconds)**
+
+Maximum time to wait for each metadata provider before treating it as unavailable for that search.
+
+- **Type:** number
+- **Default:** `8`
+- **Constraints:** min: 1, max: 60
+
+#### `DIRECT_MODE_METADATA_MAX_RESULTS_PER_PROVIDER`
+
+**Max Results per Metadata Provider**
+
+Maximum number of discovery results to request from each metadata provider.
+
+- **Type:** number
+- **Default:** `20`
+- **Constraints:** min: 1, max: 100
 
 #### `SHOW_RELEASE_SOURCE_LINKS`
 
@@ -760,7 +803,6 @@ Automatically open the downloads sidebar when a new download is queued.
 Automatically download completed files to your browser for the selected content types.
 
 - **Type:** string (comma-separated)
-  
 - **Default:** _empty list_
 
 #### `MAX_CONCURRENT_DOWNLOADS`
@@ -1325,9 +1367,9 @@ Apply per-indexer seed time and ratio preferences from Prowlarr when sending tor
 | Variable | Description | Type | Default |
 |----------|-------------|------|---------|
 | `NEWZNAB_ENABLED` | Enable searching for books via a Newznab-compatible indexer | boolean | `false` |
-| `NEWZNAB_INDEXERS` | Named Newznab connections. Each row accepts `name`, `url`, and `api_key`. | JSON array | `[]` |
-| `NEWZNAB_URL` | Legacy single-indexer URL, used when `NEWZNAB_INDEXERS` is empty | string | _none_ |
-| `NEWZNAB_API_KEY` | Legacy single-indexer API key | string (secret) | _none_ |
+| `NEWZNAB_INDEXERS` | Add each Newznab-compatible indexer separately. The configured name is shown beside every result from that indexer. | string | _empty list_ |
+| `NEWZNAB_URL` | Used only when the named indexer list is empty | string | _none_ |
+| `NEWZNAB_API_KEY` | Used only with the legacy Newznab URL | string (secret) | _none_ |
 | `NEWZNAB_EBOOK_CATEGORIES` | Newznab category IDs searched for ebooks. Most indexers use the standard 7000, but some use custom IDs. Leave empty to use 7000. | string (comma-separated) | `7000` |
 | `NEWZNAB_AUDIOBOOK_CATEGORIES` | Newznab category IDs searched for audiobooks. Most indexers use the standard 3030, but some use custom IDs. Leave empty to use 3030. | string (comma-separated) | `3030` |
 | `NEWZNAB_AUTO_EXPAND` | Automatically retry search without category filtering if no results are found | boolean | `false` |
@@ -1348,23 +1390,16 @@ Enable searching for books via a Newznab-compatible indexer
 
 **Named Indexers**
 
-Configure multiple named Newznab-compatible indexers. The name is shown beside each search result. For environment-based configuration, provide a JSON array:
+Add each Newznab-compatible indexer separately. The configured name is shown beside every result from that indexer.
 
-```json
-[
-  {"name":"NZBGeek","url":"https://api.nzbgeek.info","api_key":"..."},
-  {"name":"DrunkenSlug","url":"https://drunkenslug.com","api_key":"..."}
-]
-```
-
-- **Type:** JSON array
-- **Default:** `[]`
+- **Type:** string
+- **Default:** _empty list_
 
 #### `NEWZNAB_URL`
 
 **Legacy Newznab URL**
 
-Single-indexer fallback used only when `NEWZNAB_INDEXERS` is empty.
+Used only when the named indexer list is empty
 
 - **Type:** string
 - **Default:** _none_
@@ -1373,7 +1408,7 @@ Single-indexer fallback used only when `NEWZNAB_INDEXERS` is empty.
 
 **Legacy API Key**
 
-API key for the legacy Newznab URL.
+Used only with the legacy Newznab URL
 
 - **Type:** string (secret)
 - **Default:** _none_
@@ -1467,6 +1502,37 @@ Delay between requests in seconds to avoid rate limiting (0-10).
 - **Type:** number
 - **Default:** `1.0`
 - **Constraints:** min: 0.0, max: 10.0
+
+</details>
+
+## Libgen Search
+
+| Variable | Description | Type | Default |
+|----------|-------------|------|---------|
+| `LIBGEN_SEARCH_ENABLED` | Search the Libgen catalogue directly, including CBZ/CBR comics and manga that Anna's Archive does not index. Uses the Libgen mirrors configured under Mirrors for both search and download. Also used, unchanged, as the Libgen participant in Direct mode's metadata provider fallback (Settings → Search Mode) - there is no separate toggle for that. | boolean | `false` |
+| `LIBGEN_SEARCH_MAX_RESULTS` | Maximum number of results to request per search (1-100). | number | `25` |
+
+<details>
+<summary>Detailed descriptions</summary>
+
+#### `LIBGEN_SEARCH_ENABLED`
+
+**Enable Libgen Search**
+
+Search the Libgen catalogue directly, including CBZ/CBR comics and manga that Anna's Archive does not index. Uses the Libgen mirrors configured under Mirrors for both search and download. Also used, unchanged, as the Libgen participant in Direct mode's metadata provider fallback (Settings → Search Mode) - there is no separate toggle for that.
+
+- **Type:** boolean
+- **Default:** `false`
+
+#### `LIBGEN_SEARCH_MAX_RESULTS`
+
+**Max Results**
+
+Maximum number of results to request per search (1-100).
+
+- **Type:** number
+- **Default:** `25`
+- **Constraints:** min: 1, max: 100
 
 </details>
 
@@ -1580,6 +1646,7 @@ How long to keep cached search results before they expire.
 | Variable | Description | Type | Default |
 |----------|-------------|------|---------|
 | `PROWLARR_TORRENT_CLIENT` | Choose which torrent client to use | string (choice) | _empty string_ |
+| `BLACKHOLE_DIRECTORY` | Directory where Shelfmark saves .torrent files for another downloader | string | _none_ |
 | `ALLDEBRID_API_KEY` | AllDebrid API Key (apiv4) from your AllDebrid account settings | string (secret) | _none_ |
 | `REALDEBRID_API_KEY` | Real-Debrid API Key (Secret Token) from your Real-Debrid account settings | string (secret) | _none_ |
 | `QBITTORRENT_URL` | Web UI URL of your qBittorrent instance | string | _none_ |
@@ -1633,7 +1700,16 @@ Choose which torrent client to use
 
 - **Type:** string (choice)
 - **Default:** _empty string_
-- **Options:** `""` (None), `alldebrid` (AllDebrid), `qbittorrent` (qBittorrent), `realdebrid` (Real-Debrid), `transmission` (Transmission), `deluge` (Deluge), `rtorrent` (rTorrent)
+- **Options:** `""` (None), `alldebrid` (AllDebrid), `blackhole` (Blackhole), `qbittorrent` (qBittorrent), `realdebrid` (Real-Debrid), `transmission` (Transmission), `deluge` (Deluge), `rtorrent` (rTorrent)
+
+#### `BLACKHOLE_DIRECTORY`
+
+**Blackhole Directory**
+
+Directory where Shelfmark saves .torrent files for another downloader
+
+- **Type:** string
+- **Default:** _none_
 
 #### `ALLDEBRID_API_KEY`
 

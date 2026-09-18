@@ -486,6 +486,87 @@ def search_mode_settings() -> list[SettingsField]:
             default="relevance",
             show_when={"field": "SEARCH_MODE", "value": "direct"},
         ),
+        HeadingField(
+            key="direct_mode_metadata_fallback_heading",
+            title="Metadata Provider Fallback",
+            description=(
+                "Fall back to metadata providers for discovery when Anna's Archive has no "
+                "results or is unavailable. Discovery-only results have no download source of "
+                "their own - opening one searches your enabled release sources (Source "
+                "Priority) the same way Universal mode does."
+            ),
+            show_when={"field": "SEARCH_MODE", "value": "direct"},
+        ),
+        CheckboxField(
+            key="DIRECT_MODE_METADATA_FALLBACK_ENABLED",
+            label="Enable Metadata Provider Fallback",
+            description=(
+                "Only providers you've separately enabled and configured below (Open Library, "
+                "Google Books, Hardcover, ...) participate - this switch does not enable any "
+                "provider by itself, and no provider is queried unless this is on."
+            ),
+            default=False,
+            show_when={"field": "SEARCH_MODE", "value": "direct"},
+        ),
+        SelectField(
+            key="DIRECT_MODE_FALLBACK_STRATEGY",
+            label="Fallback Strategy",
+            description="When to query metadata providers relative to Anna's Archive.",
+            options=[
+                {
+                    "value": "on_empty_or_error",
+                    "label": "Only when Anna's Archive fails or finds nothing",
+                    "description": "Fewer API calls - metadata providers are a true fallback.",
+                },
+                {
+                    "value": "parallel",
+                    "label": "Always, in parallel with Anna's Archive",
+                    "description": (
+                        "Faster combined results - queries metadata providers on every search."
+                    ),
+                },
+            ],
+            default="on_empty_or_error",
+            show_when={"field": "SEARCH_MODE", "value": "direct"},
+            disabled_when={
+                "field": "DIRECT_MODE_METADATA_FALLBACK_ENABLED",
+                "value": False,
+                "reason": "Enable metadata provider fallback first.",
+            },
+        ),
+        NumberField(
+            key="DIRECT_MODE_METADATA_TIMEOUT_SECONDS",
+            label="Metadata Provider Timeout (seconds)",
+            description=(
+                "Maximum time to wait for each metadata provider before treating it as "
+                "unavailable for that search."
+            ),
+            min_value=1,
+            max_value=60,
+            step=1,
+            default=8,
+            show_when={"field": "SEARCH_MODE", "value": "direct"},
+            disabled_when={
+                "field": "DIRECT_MODE_METADATA_FALLBACK_ENABLED",
+                "value": False,
+                "reason": "Enable metadata provider fallback first.",
+            },
+        ),
+        NumberField(
+            key="DIRECT_MODE_METADATA_MAX_RESULTS_PER_PROVIDER",
+            label="Max Results per Metadata Provider",
+            description="Maximum number of discovery results to request from each metadata provider.",
+            min_value=1,
+            max_value=100,
+            step=1,
+            default=20,
+            show_when={"field": "SEARCH_MODE", "value": "direct"},
+            disabled_when={
+                "field": "DIRECT_MODE_METADATA_FALLBACK_ENABLED",
+                "value": False,
+                "reason": "Enable metadata provider fallback first.",
+            },
+        ),
         CheckboxField(
             key="SHOW_RELEASE_SOURCE_LINKS",
             label="Show Release Source Links",

@@ -2,6 +2,7 @@ import type { CSSProperties } from 'react';
 
 import { useSearchMode } from '../contexts/SearchModeContext';
 import type { Book, ButtonStateInfo } from '../types';
+import { isDiscoveryOnlyBook } from '../types';
 import { BookDownloadButton } from './BookDownloadButton';
 import { BookGetButton } from './BookGetButton';
 
@@ -35,7 +36,11 @@ export function BookActionButton({
 }: BookActionButtonProps) {
   const { searchMode } = useSearchMode();
 
-  if (searchMode === 'universal') {
+  // Universal mode always searches release sources first; Direct mode does too for a
+  // discovery-only result (found by a metadata provider, no release of its own yet -
+  // see the Direct-mode fallback in useSearch/searchDirectEnriched). A Direct-mode
+  // result with its own release (Anna's Archive, ...) downloads immediately either way.
+  if (searchMode === 'universal' || isDiscoveryOnlyBook(book)) {
     return (
       <BookGetButton
         book={book}

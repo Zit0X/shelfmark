@@ -18,7 +18,9 @@ def libgen_config_settings() -> list[SettingsField]:
             description=(
                 "Search the Libgen catalogue directly, including CBZ/CBR comics and manga "
                 "that Anna's Archive does not index. Uses the Libgen mirrors configured "
-                "under Mirrors for both search and download."
+                "under Mirrors for both search and download. Also used, unchanged, as the "
+                "Libgen participant in Direct mode's metadata provider fallback (Settings "
+                "→ Search Mode) - there is no separate toggle for that."
             ),
             default=False,
         ),

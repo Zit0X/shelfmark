@@ -198,6 +198,10 @@ class BookMetadata:
     authors: list[str] = field(default_factory=list)
     isbn_10: str | None = None
     isbn_13: str | None = None
+    asin: str | None = None
+    # MD5 of the underlying file, when a provider happens to know one (e.g. a book
+    # discovered by merging in an Anna's Archive release - see metadata_dedup).
+    md5: str | None = None
     cover_url: str | None = None
     description: str | None = None
     publisher: str | None = None
@@ -224,6 +228,10 @@ class BookMetadata:
     # Alternative titles by language (for localized searches)
     # Maps language code (e.g., "de", "German") to localized title
     titles_by_language: dict[str, str] = field(default_factory=dict)
+
+    # Provider's own response, kept only for debugging a specific provider's parsing.
+    # Never serialized to the frontend or logged - see metadata_dedup / metadata_orchestrator.
+    raw_provider_metadata: dict[str, Any] | None = None
 
 
 def group_languages_by_localized_title(
@@ -712,3 +720,9 @@ with suppress(ImportError):
 
 with suppress(ImportError):
     from shelfmark.metadata_providers import moly as moly
+
+with suppress(ImportError):
+    from shelfmark.metadata_providers import libgen_search as libgen_search
+
+with suppress(ImportError):
+    from shelfmark.metadata_providers import zlibrary as zlibrary

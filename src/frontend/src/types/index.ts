@@ -1,3 +1,5 @@
+import { isRecord } from '../utils/objectHelpers';
+
 // Search mode constants and type
 export const SEARCH_MODE = {
   DIRECT: 'direct',
@@ -74,6 +76,33 @@ export function getDownloadsCount(book: Book): number | null {
   }
   return null;
 }
+
+// One provider's record for a book merged from several sources (Direct mode fallback).
+export interface DiscoveryBookSource {
+  provider: string;
+  provider_id: string;
+  provider_display_name?: string;
+  source_url?: string;
+}
+
+/**
+ * A book found only by a metadata provider (Direct mode fallback), with no download
+ * source of its own yet - opening it searches release sources the normal way, the
+ * same as any Universal-mode result.
+ */
+export const isDiscoveryOnlyBook = (book: Book): boolean => Boolean(book.extra?.metadata_only);
+
+const isDiscoveryBookSource = (value: unknown): value is DiscoveryBookSource => {
+  return (
+    isRecord(value) && typeof value.provider === 'string' && typeof value.provider_id === 'string'
+  );
+};
+
+/** Every provider that reported a book, when it was merged from more than one source. */
+export const getDiscoverySources = (book: Book): DiscoveryBookSource[] | undefined => {
+  const sources = book.extra?.sources;
+  return Array.isArray(sources) && sources.every(isDiscoveryBookSource) ? sources : undefined;
+};
 
 // Status response types
 export interface StatusData {
@@ -291,6 +320,10 @@ export interface AppConfig {
   supported_formats: string[];
   supported_audiobook_formats: string[]; // Audiobook formats (m4b, mp3)
   search_mode: SearchMode;
+  // Direct mode: also search enabled metadata providers when Anna's Archive has no
+  // results (or is unavailable), merging discovery-only cards into the result list.
+  direct_mode_metadata_fallback_enabled: boolean;
+  direct_mode_fallback_strategy: 'on_empty_or_error' | 'parallel';
   metadata_sort_options: SortOption[];
   metadata_search_fields: MetadataSearchField[];
   default_release_source?: string; // Default tab in ReleaseModal (e.g., 'direct_download')
@@ -520,6 +553,15 @@ export interface ReleasesResponse {
   errors?: string[];
   column_config?: ReleaseColumnConfig | null; // Plugin-driven column configuration
   search_info?: Record<string, SourceSearchInfo>; // Per-source search metadata
+}
+
+// Per-provider outcome reported by GET /api/direct-search (Direct mode metadata fallback).
+export interface DirectSearchProviderStatus {
+  name: string; // e.g. 'direct_download', 'openlibrary'
+  display_name: string;
+  status: 'ok' | 'no_results' | 'error' | 'disabled' | 'not_configured';
+  message?: string | null;
+  count: number;
 }
 
 // Search status update from WebSocket (for ReleaseModal loading state)

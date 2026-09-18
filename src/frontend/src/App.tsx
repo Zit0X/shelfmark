@@ -487,6 +487,7 @@ function App() {
     loadMore,
     totalFound,
     resultsSourceUrl,
+    providerStatuses,
   } = useSearch({
     showToast,
     setIsAuthenticated,
@@ -2599,6 +2600,7 @@ function App() {
             totalFound={totalFound}
             onShowToast={showToast}
             resultsSourceUrl={resultsSourceUrl}
+            providerStatuses={providerStatuses}
           />
 
           {selectedBook && (

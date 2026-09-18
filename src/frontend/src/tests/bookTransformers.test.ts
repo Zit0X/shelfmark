@@ -1,9 +1,16 @@
 import { describe, it, expect } from 'vitest';
 
-import { isMetadataBook, type Release } from '../types/index';
 import {
+  getDiscoverySources,
+  isDiscoveryOnlyBook,
+  isMetadataBook,
+  type Release,
+} from '../types/index';
+import {
+  transformDiscoveryToBook,
   transformReleaseToDirectBook,
   transformSourceRecordToBook,
+  type DiscoveryBookData,
 } from '../utils/bookTransformers';
 
 describe('bookTransformers.transformReleaseToDirectBook', () => {
@@ -82,5 +89,60 @@ describe('bookTransformers.transformSourceRecordToBook', () => {
     expect(book.source_url).toBe('https://example.com/record/md5-456');
     expect(book.info).toEqual({ Downloads: ['64'] });
     expect(isMetadataBook(book)).toBe(false);
+  });
+});
+
+describe('bookTransformers.transformDiscoveryToBook', () => {
+  const discoveryData: DiscoveryBookData = {
+    provider: 'openlibrary',
+    provider_id: 'OL1W',
+    provider_display_name: 'Open Library',
+    title: 'Meurtre au festival des citrouilles',
+    authors: ['Ava Manceau'],
+    language: 'fr',
+    sources: [
+      { provider: 'openlibrary', provider_id: 'OL1W', provider_display_name: 'Open Library' },
+      { provider: 'googlebooks', provider_id: 'vol-1', provider_display_name: 'Google Books' },
+    ],
+    match_basis: 'title_author_lang',
+    relevance_score: 0.85,
+  };
+
+  it('maps a discovery-only result into the metadata-provider book card shape', () => {
+    const book = transformDiscoveryToBook(discoveryData);
+
+    expect(book.id).toBe('openlibrary:OL1W');
+    expect(book.title).toBe('Meurtre au festival des citrouilles');
+    expect(book.author).toBe('Ava Manceau');
+    expect(book.provider).toBe('openlibrary');
+    expect(book.provider_id).toBe('OL1W');
+    expect(book.source).toBeUndefined();
+  });
+
+  it('is treated as a metadata book and as discovery-only, unlike a direct release', () => {
+    const book = transformDiscoveryToBook(discoveryData);
+
+    expect(isMetadataBook(book)).toBe(true);
+    expect(isDiscoveryOnlyBook(book)).toBe(true);
+  });
+
+  it('carries every source that reported the book', () => {
+    const book = transformDiscoveryToBook(discoveryData);
+
+    expect(getDiscoverySources(book)).toEqual(discoveryData.sources);
+  });
+
+  it('a plain direct-mode release is neither a metadata book nor discovery-only', () => {
+    const release: Release = {
+      source: 'direct_download',
+      source_id: 'md5-123',
+      title: 'Example Title',
+    };
+
+    const book = transformReleaseToDirectBook(release);
+
+    expect(isMetadataBook(book)).toBe(false);
+    expect(isDiscoveryOnlyBook(book)).toBe(false);
+    expect(getDiscoverySources(book)).toBeUndefined();
   });
 });

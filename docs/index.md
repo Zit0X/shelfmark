@@ -16,6 +16,7 @@ Use the guides below to set up the app, connect your library tools, and understa
 - [Reverse Proxy](reverse-proxy.md)
 - [OIDC](oidc.md)
 - [URL Search Parameters](url-search-parameters.md)
+- [Direct Mode Metadata Fallback](direct-mode-fallback.md)
 - [Custom Scripts](custom-scripts.md)
 
 ## Help

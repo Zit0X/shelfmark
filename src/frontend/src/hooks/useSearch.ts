@@ -2,8 +2,20 @@ import { useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { DEFAULT_SUPPORTED_FORMATS } from '../data/languages';
-import { searchBooks, searchMetadata, AuthenticationError } from '../services/api';
-import type { Book, AppConfig, AdvancedFilterState, ContentType, SearchMode } from '../types';
+import {
+  searchBooks,
+  searchDirectEnriched,
+  searchMetadata,
+  AuthenticationError,
+} from '../services/api';
+import type {
+  Book,
+  AppConfig,
+  AdvancedFilterState,
+  ContentType,
+  DirectSearchProviderStatus,
+  SearchMode,
+} from '../types';
 import { LANGUAGE_OPTION_DEFAULT } from '../utils/languageFilters';
 import { describeSearchFailure } from '../utils/searchFailureMessage';
 
@@ -54,6 +66,8 @@ interface UseSearchReturn {
   // Source URL and title for the current result set (e.g. Hardcover list page)
   resultsSourceUrl: string | undefined;
   resultsSourceTitle: string | undefined;
+  // Per-provider outcome from the Direct-mode metadata fallback, when it ran.
+  providerStatuses: DirectSearchProviderStatus[];
 }
 
 export function useSearch(options: UseSearchOptions): UseSearchReturn {
@@ -92,6 +106,7 @@ export function useSearch(options: UseSearchOptions): UseSearchReturn {
   const [totalFound, setTotalFound] = useState(0);
   const [resultsSourceUrl, setResultsSourceUrl] = useState<string | undefined>();
   const [resultsSourceTitle, setResultsSourceTitle] = useState<string | undefined>();
+  const [providerStatuses, setProviderStatuses] = useState<DirectSearchProviderStatus[]>([]);
 
   // Store last search params for loadMore
   const lastSearchParamsRef = useRef<{
@@ -246,19 +261,26 @@ export function useSearch(options: UseSearchOptions): UseSearchReturn {
       if (!query) {
         setBooks([]);
         setLastSearchQuery('');
+        setProviderStatuses([]);
         return;
       }
       setIsSearching(true);
       setLastSearchQuery(query);
+      setProviderStatuses([]);
 
       try {
-        const results = await searchBooks(query);
+        // The enriched endpoint returns 404 when the fallback isn't enabled, so only
+        // call it when config says it's on - searchBooks is the unchanged default path.
+        const results = config?.direct_mode_metadata_fallback_enabled
+          ? await searchDirectEnriched(query)
+          : { books: await searchBooks(query), providerStatuses: [] };
 
-        if (results.length > 0) {
-          setBooks(results);
+        if (results.books.length > 0) {
+          setBooks(results.books);
         } else {
           showToast('No results found', 'error');
         }
+        setProviderStatuses(results.providerStatuses);
       } catch (error) {
         if (error instanceof AuthenticationError) {
           handleSearchError(error, 'Search failed');
@@ -279,6 +301,7 @@ export function useSearch(options: UseSearchOptions): UseSearchReturn {
       setSearchInput('');
       setShowAdvanced(false);
       setLastSearchQuery('');
+      setProviderStatuses([]);
       onSearchReset?.();
 
       const resetFormats = config?.supported_formats || DEFAULT_FORMAT_SELECTION;
@@ -378,5 +401,6 @@ export function useSearch(options: UseSearchOptions): UseSearchReturn {
     totalFound,
     resultsSourceUrl,
     resultsSourceTitle,
+    providerStatuses,
   };
 }

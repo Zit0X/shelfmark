@@ -4,12 +4,14 @@ import type {
   AppConfig,
   LoginCredentials,
   AuthResponse,
+  Release,
   ReleaseSource,
   ReleasesResponse,
   RequestPolicyResponse,
   CreateRequestPayload,
   RequestRecord,
   RequestSubmissionResult,
+  DirectSearchProviderStatus,
   MetadataProvidersResponse,
   MetadataSearchConfig,
   PackBook,
@@ -23,8 +25,13 @@ import type {
   UpdateResult,
 } from '../types/settings';
 import { getApiBase, withBasePath } from '../utils/basePath';
-import type { MetadataBookData, SourceRecordData } from '../utils/bookTransformers';
+import type {
+  DiscoveryBookData,
+  MetadataBookData,
+  SourceRecordData,
+} from '../utils/bookTransformers';
 import {
+  transformDiscoveryToBook,
   transformMetadataToBook,
   transformReleaseToDirectBook,
   transformSourceRecordToBook,
@@ -287,6 +294,40 @@ export const searchBooks = async (query: string): Promise<Book[]> => {
     searchTimeoutMs,
   );
   return response.releases.map(transformReleaseToDirectBook);
+};
+
+// Response shape for GET /api/direct-search (Direct mode metadata-provider fallback).
+interface DirectSearchResponse {
+  releases: Release[];
+  discovery: DiscoveryBookData[];
+  sources_searched: string[];
+  provider_statuses: DirectSearchProviderStatus[];
+}
+
+export interface DirectSearchResult {
+  books: Book[];
+  providerStatuses: DirectSearchProviderStatus[];
+}
+
+/**
+ * Direct mode search enriched with a metadata-provider fallback: merges Anna's
+ * Archive (and any other Direct Download provider) releases with discovery-only
+ * results from enabled metadata providers. Only call this when
+ * `config.direct_mode_metadata_fallback_enabled` is true - the endpoint returns 404
+ * otherwise, and `searchBooks` above is the unchanged default-mode search.
+ */
+export const searchDirectEnriched = async (query: string): Promise<DirectSearchResult> => {
+  if (!query) return { books: [], providerStatuses: [] };
+  const response = await fetchJSON<DirectSearchResponse>(
+    `${API_BASE}/direct-search?${query}`,
+    {},
+    searchTimeoutMs,
+  );
+  const books = [
+    ...response.releases.map(transformReleaseToDirectBook),
+    ...response.discovery.map(transformDiscoveryToBook),
+  ];
+  return { books, providerStatuses: response.provider_statuses };
 };
 
 // Metadata search response type (internal)

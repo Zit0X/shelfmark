@@ -2,7 +2,7 @@ import { useState } from 'react';
 
 import { useSearchMode } from '../../contexts/SearchModeContext';
 import type { Book, ButtonStateInfo, DisplayField } from '../../types';
-import { getDownloadsCount } from '../../types';
+import { getDownloadsCount, isDiscoveryOnlyBook } from '../../types';
 import { bookSupportsTargets } from '../../utils/bookTargetLoader';
 import { getFormatColor, getLanguageColor } from '../../utils/colorMaps';
 import { BookActionButton } from '../BookActionButton';
@@ -129,9 +129,13 @@ export const ListView = ({
     >
       <div className="w-full divide-y divide-gray-200/60 dark:divide-gray-800/60">
         {books.map((book, index) => {
-          // Use appropriate button state function based on search mode
+          // Use appropriate button state function based on search mode - or, for a
+          // Direct-mode discovery result, the same tracking Universal mode uses (see
+          // ResultsSection and BookActionButton).
           const buttonState =
-            searchMode === 'universal' ? getUniversalButtonState(book.id) : getButtonState(book.id);
+            searchMode === 'universal' || isDiscoveryOnlyBook(book)
+              ? getUniversalButtonState(book.id)
+              : getButtonState(book.id);
           const isLoadingDetails = detailsLoadingId === book.id;
           const ratingField = book.display_fields?.find((field) => field.icon === 'star');
           const lengthField = book.display_fields?.find(

@@ -1,4 +1,4 @@
-import type { Book, Release } from '../types';
+import type { Book, DiscoveryBookSource, Release } from '../types';
 import { isRecord, isStringArray } from './objectHelpers';
 
 /**
@@ -194,4 +194,33 @@ export function transformReleaseToDirectBook(release: Release): Book {
 
 export function transformSourceRecordToBook(record: SourceRecordData): Book {
   return transformSourceBackedDataToBook(record);
+}
+
+/**
+ * A discovery-only result from `/api/direct-search` (Direct mode metadata fallback):
+ * the same shape a metadata provider returns, plus which provider(s) found it.
+ */
+export interface DiscoveryBookData extends MetadataBookData {
+  sources: DiscoveryBookSource[];
+  match_basis: string;
+  relevance_score: number;
+}
+
+/**
+ * Transform a discovery-only result into a `Book`. Reuses `transformMetadataToBook` so
+ * these cards get exactly the metadata-provider shape (`isMetadataBook` returns true,
+ * routing them through the normal "search release sources" flow rather than a direct
+ * download) and stashes the merge info in `extra` for the UI to show provenance.
+ */
+export function transformDiscoveryToBook(data: DiscoveryBookData): Book {
+  const book = transformMetadataToBook(data);
+  return {
+    ...book,
+    extra: {
+      metadata_only: true,
+      sources: data.sources,
+      match_basis: data.match_basis,
+      relevance_score: data.relevance_score,
+    },
+  };
 }
