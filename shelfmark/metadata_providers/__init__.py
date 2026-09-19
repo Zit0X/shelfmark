@@ -722,6 +722,9 @@ with suppress(ImportError):
     from shelfmark.metadata_providers import moly as moly
 
 with suppress(ImportError):
+    from shelfmark.metadata_providers import babelio as babelio
+
+with suppress(ImportError):
     from shelfmark.metadata_providers import libgen_search as libgen_search
 
 with suppress(ImportError):
