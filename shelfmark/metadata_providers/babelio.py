@@ -77,8 +77,10 @@ REQUEST_HEADERS = {
 REQUEST_TIMEOUT_SECONDS = 10
 
 # Matches Booknode's combined "Series, Tome N : Title" string into its three parts.
+# Novella/half-tome positions are written with a French decimal comma ("Tome 0,5"),
+# hence accepting both "." and "," here.
 _SERIES_TITLE_RE = re.compile(
-    r"^(?P<series>.+?),\s*Tome\s*(?P<position>[\d.]+)\s*:\s*(?P<title>.+)$",
+    r"^(?P<series>.+?),\s*Tome\s*(?P<position>\d+(?:[.,]\d+)?)\s*:\s*(?P<title>.+)$",
     re.IGNORECASE,
 )
 
@@ -97,6 +99,8 @@ _BABELIO_CHALLENGE_MARKER = "rification de s"
 # ("/serie/<slug>") and comment permalinks ("<book url>/commentaires/<id>") don't
 # match this, which is exactly how author-page scraping tells them apart below.
 _BOOKNODE_BOOK_URL_RE = re.compile(r"^https://booknode\.com/[a-z0-9_]+_\d+$")
+
+BOOKNODE_SERIES_URL_PREFIX = f"{BOOKNODE_BASE_URL}/serie/"
 
 
 class RateLimiter:
@@ -153,7 +157,7 @@ def _split_series_title(name: str) -> tuple[str | None, float | None, str]:
     series = match.group("series").strip()
     title = match.group("title").strip()
     try:
-        position = float(match.group("position"))
+        position = float(match.group("position").replace(",", "."))
     except ValueError:
         position = None
     return series, position, title
@@ -394,42 +398,123 @@ class BabelioSearchProvider(MetadataProvider):
             return None
 
     def _fetch_booknode_author_books(self, author: dict, limit: int) -> list[BookMetadata]:
-        """Fetch an author's Booknode profile page and extract her clean book links."""
-        href = author.get("href")
-        if not href:
+        """Fetch an author's full Booknode bibliography (``/auteur/<slug>/livres``).
+
+        That page lists her standalone (one-shot) books directly, but each series she's
+        written only appears there as a single card linking to the series as a whole -
+        getting the individual tomes takes one extra request per series (see
+        ``_fetch_booknode_series_books``). Series are expanded in page order and only
+        as needed to satisfy ``limit``, so a caller asking for a handful of results
+        doesn't pay for a prolific author's entire catalog.
+        """
+        author_href = author.get("href")
+        if not author_href:
             return []
 
-        response = self._get(href)
+        livres_url = author_href.rstrip("/") + "/livres"
+        response = self._get(livres_url)
         if response is None:
             return []
 
-        return self._parse_booknode_author_page(response.text, author.get("name"))[:limit]
+        author_name = author.get("name")
+        one_shots, series_hrefs = self._parse_booknode_livres_page(response.text, author_name)
 
-    def _parse_booknode_author_page(
+        books = list(one_shots)
+        seen = {book.provider_id for book in books}
+
+        for series_href in series_hrefs:
+            if len(books) >= limit:
+                break
+            for book in self._fetch_booknode_series_books(series_href, author_name):
+                if book.provider_id not in seen:
+                    seen.add(book.provider_id)
+                    books.append(book)
+
+        return books[:limit]
+
+    def _parse_booknode_livres_page(
+        self, html: str, author_name: str | None
+    ) -> tuple[list[BookMetadata], list[str]]:
+        """Parse ``/auteur/<slug>/livres`` into standalone books and series to expand.
+
+        Both the "Toutes les séries" and "Tous les livres" sections use the same
+        ``.panel-book-card`` widget; they're told apart by what its cover link points
+        to - a book URL (see ``_BOOKNODE_BOOK_URL_RE``) for a standalone book, or
+        ``/serie/<slug>`` for a series, which is returned separately for the caller to
+        expand into individual tomes.
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        one_shots: list[BookMetadata] = []
+        series_hrefs: list[str] = []
+        seen_series: set[str] = set()
+        seen_books: set[str] = set()
+
+        for card in soup.select(".panel-book-card"):
+            cover_link = card.select_one(".cover-wrapper a[href]")
+            if cover_link is None:
+                continue
+            href = str(cover_link.get("href") or "")
+
+            if href.startswith(BOOKNODE_SERIES_URL_PREFIX):
+                if href not in seen_series:
+                    seen_series.add(href)
+                    series_hrefs.append(href)
+                continue
+
+            if not _BOOKNODE_BOOK_URL_RE.fullmatch(href):
+                continue
+
+            slug = _booknode_slug_from_href(href)
+            if not slug or slug in seen_books:
+                continue
+
+            title_link = card.select_one(".title a[href]")
+            title_text = _clean_text(title_link.get_text()) if title_link else None
+            if not title_text:
+                continue
+            seen_books.add(slug)
+
+            img = card.select_one(".cover-wrapper img")
+            cover_url = (img.get("data-src") or img.get("src")) if img is not None else None
+
+            one_shots.append(
+                self._build_booknode_book(
+                    slug=slug,
+                    name=title_text,
+                    authors=[author_name] if author_name else [],
+                    cover_url=cover_url,
+                    source_url=href,
+                )
+            )
+
+        return one_shots, series_hrefs
+
+    def _fetch_booknode_series_books(
+        self, series_href: str, author_name: str | None
+    ) -> list[BookMetadata]:
+        response = self._get(series_href)
+        if response is None:
+            return []
+        return self._parse_booknode_series_page(response.text, author_name)
+
+    def _parse_booknode_series_page(
         self, html: str, author_name: str | None
     ) -> list[BookMetadata]:
-        """Extract an author's cleanly-linked books from her Booknode profile page.
-
-        Only Booknode's "latest release" / "next release" panels and her standalone
-        (non-series) books carousel put a full ``title`` attribute on the book anchor;
-        the page's series carousel links to each series as a whole (not a specific
-        book) and its activity feed links to comment permalinks, so both are skipped by
-        requiring a clean book URL (see ``_BOOKNODE_BOOK_URL_RE``) with a ``title``
-        attribute. A practical consequence: an older mid-series tome that is neither
-        the latest nor the next release may not surface here - a direct title search
-        still finds those.
-        """
+        """Parse every tome listed under "La liste des tomes" on a series page."""
         soup = BeautifulSoup(html, "html.parser")
         books: list[BookMetadata] = []
         seen: set[str] = set()
 
-        for anchor in soup.find_all("a", href=True):
-            href = str(anchor["href"])
+        for entry in soup.select("article.liste .book"):
+            cover_link = entry.select_one("a.main_cover_link[href]")
+            if cover_link is None:
+                continue
+            href = str(cover_link.get("href") or "")
             if not _BOOKNODE_BOOK_URL_RE.fullmatch(href):
                 continue
 
-            title_attr = _clean_text(anchor.get("title"))
-            if not title_attr:
+            title_text = _clean_text(cover_link.get("title"))
+            if not title_text:
                 continue
 
             slug = _booknode_slug_from_href(href)
@@ -437,17 +522,13 @@ class BabelioSearchProvider(MetadataProvider):
                 continue
             seen.add(slug)
 
-            cover_url = None
-            img = anchor.find("img")
-            if img is not None:
-                cover_url = img.get("data-src") or img.get("src")
-                if cover_url and str(cover_url).startswith("data:"):
-                    cover_url = img.get("data-src")
+            img = cover_link.find("img")
+            cover_url = (img.get("data-src") or img.get("src")) if img is not None else None
 
             books.append(
                 self._build_booknode_book(
                     slug=slug,
-                    name=title_attr,
+                    name=title_text,
                     authors=[author_name] if author_name else [],
                     cover_url=cover_url,
                     source_url=href,
