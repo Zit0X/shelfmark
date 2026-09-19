@@ -19,15 +19,21 @@ Babelio can start contributing results automatically if that ever changes
 (e.g. a future official API, or a network path that isn't challenged).
 """
 
+from __future__ import annotations
+
 import re
 import threading
 import time
+import unicodedata
 from collections import deque
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 from shelfmark.core.cache import cacheable
 from shelfmark.core.logger import setup_logger
@@ -85,6 +91,12 @@ _BABELIO_BOOK_HREF_RE = re.compile(r'href="(/livres/[^/"]+/(\d+))"[^>]*>([^<]+)<
 # Substring of Babelio's anti-bot interstitial title, byte-safe regardless of the
 # page's declared (often mismatched) charset.
 _BABELIO_CHALLENGE_MARKER = "rification de s"
+
+# A Booknode book page URL is always the bare domain + slug + numeric id, e.g.
+# "https://booknode.com/les_heritiers_de_laube_03646884". Series pages
+# ("/serie/<slug>") and comment permalinks ("<book url>/commentaires/<id>") don't
+# match this, which is exactly how author-page scraping tells them apart below.
+_BOOKNODE_BOOK_URL_RE = re.compile(r"^https://booknode\.com/[a-z0-9_]+_\d+$")
 
 
 class RateLimiter:
@@ -151,6 +163,41 @@ def _booknode_slug_from_href(href: str) -> str | None:
     """Extract the path slug (which doubles as Booknode's book id) from a full URL."""
     path = urlparse(href).path.strip("/")
     return path or None
+
+
+def _normalize_for_match(value: str) -> str:
+    """Accent-insensitive, punctuation-insensitive comparison form."""
+    if not value:
+        return ""
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    value = "".join(char if char.isalnum() else " " for char in value)
+    return " ".join(value.lower().split())
+
+
+def _is_confident_author_match(author_name: str, query: str) -> bool:
+    """Whether Booknode's suggested author is actually who the query is about.
+
+    Booknode's quicksearch suggests an "author" for almost any query that shares even
+    one word with an author's name (e.g. searching a title containing "des" once
+    suggested the unrelated author "Guy Des Cars") - that noise must not be allowed to
+    hijack an ordinary title search. Requiring the (normalized) author name to fully
+    contain, or be contained in, the query keeps genuine author searches ("Ava
+    Manceau", "Manceau", "livres de Ava Manceau") while rejecting coincidental
+    single-word overlaps.
+    """
+    normalized_author = _normalize_for_match(author_name)
+    normalized_query = _normalize_for_match(query)
+    if not normalized_author or not normalized_query:
+        return False
+    return normalized_author in normalized_query or normalized_query in normalized_author
+
+
+def _item_matches_author(item: dict, author_href: str) -> bool:
+    """Whether a Booknode search-result book lists the given author (by profile URL)."""
+    return any(
+        isinstance(a, dict) and a.get("href") == author_href for a in (item.get("authors") or [])
+    )
 
 
 @register_provider("babelio")
@@ -233,10 +280,7 @@ class BabelioSearchProvider(MetadataProvider):
         return self._search_babelio(query, limit)
 
     def _search_booknode(self, query: str, limit: int) -> list[BookMetadata]:
-        response = self._get(
-            BOOKNODE_QUICKSEARCH_URL,
-            params={"search": query, "option": "challenge"},
-        )
+        response = self._get(BOOKNODE_QUICKSEARCH_URL, params={"search": query})
         if response is None:
             return []
 
@@ -246,14 +290,82 @@ class BabelioSearchProvider(MetadataProvider):
             logger.warning("Booknode quicksearch returned non-JSON response")
             return []
 
-        books: list[BookMetadata] = []
-        for item in data.get("book", [])[:limit]:
-            book = self._parse_booknode_search_item(item)
-            if book:
-                books.append(book)
+        raw_books = data.get("book", [])
+        raw_authors = data.get("author", [])
 
+        best_author = raw_authors[0] if raw_authors else None
+        if best_author and not _is_confident_author_match(best_author.get("name", ""), query):
+            # e.g. searching a title containing "des" once suggested the unrelated
+            # author "Guy Des Cars" - not a real author search, ignore the suggestion.
+            best_author = None
+
+        if best_author:
+            author_href = best_author.get("href", "")
+            books = self._dedup_books(
+                self._parse_booknode_search_item(item)
+                for item in raw_books
+                if _item_matches_author(item, author_href)
+            )
+            if not books:
+                # A pure author-name search: the fuzzy title index has nothing of
+                # hers, so fetch her actual Booknode bibliography instead.
+                books = self._fetch_booknode_author_books(best_author, limit)
+            logger.info(
+                "Booknode search '%s' matched author '%s': %s results",
+                query,
+                best_author.get("name"),
+                len(books),
+            )
+            return books[:limit]
+
+        books = self._dedup_books(self._parse_booknode_search_item(item) for item in raw_books)
         logger.info("Booknode search '%s' returned %s results", query, len(books))
-        return books
+        return books[:limit]
+
+    def _dedup_books(self, books: Iterable[BookMetadata | None]) -> list[BookMetadata]:
+        result: list[BookMetadata] = []
+        seen: set[str] = set()
+        for book in books:
+            if book and book.provider_id not in seen:
+                seen.add(book.provider_id)
+                result.append(book)
+        return result
+
+    def _build_booknode_book(
+        self,
+        *,
+        slug: str,
+        name: str,
+        authors: list[str],
+        cover_url: str | None,
+        source_url: str,
+    ) -> BookMetadata:
+        series_name, series_position, title = _split_series_title(name)
+
+        display_fields = []
+        if series_name:
+            position_label = (
+                f"{series_name} {series_position:g}" if series_position else series_name
+            )
+            display_fields.append(
+                DisplayField(label="Series", value=position_label, icon="editions")
+            )
+
+        return BookMetadata(
+            provider=self.name,
+            provider_id=f"bn:{slug}",
+            provider_display_name=self.display_name,
+            title=title,
+            authors=authors,
+            cover_url=cover_url,
+            source_url=source_url,
+            language="fr",
+            series_name=series_name,
+            series_position=series_position,
+            search_title=title,
+            search_author=authors[0] if authors else None,
+            display_fields=display_fields,
+        )
 
     def _parse_booknode_search_item(self, item: dict) -> BookMetadata | None:
         try:
@@ -266,38 +378,83 @@ class BabelioSearchProvider(MetadataProvider):
             if not slug:
                 return None
 
-            series_name, series_position, title = _split_series_title(name)
             authors = [
                 a["nom"] for a in item.get("authors", []) if isinstance(a, dict) and a.get("nom")
             ]
 
-            display_fields = []
-            if series_name:
-                position_label = (
-                    f"{series_name} {series_position:g}" if series_position else series_name
-                )
-                display_fields.append(
-                    DisplayField(label="Series", value=position_label, icon="editions")
-                )
-
-            return BookMetadata(
-                provider=self.name,
-                provider_id=f"bn:{slug}",
-                provider_display_name=self.display_name,
-                title=title,
+            return self._build_booknode_book(
+                slug=slug,
+                name=name,
                 authors=authors,
                 cover_url=item.get("img"),
                 source_url=href,
-                language="fr",
-                series_name=series_name,
-                series_position=series_position,
-                search_title=title,
-                search_author=authors[0] if authors else None,
-                display_fields=display_fields,
             )
         except (TypeError, ValueError, AttributeError, KeyError) as e:
             logger.debug("Failed to parse Booknode search item: %s", e)
             return None
+
+    def _fetch_booknode_author_books(self, author: dict, limit: int) -> list[BookMetadata]:
+        """Fetch an author's Booknode profile page and extract her clean book links."""
+        href = author.get("href")
+        if not href:
+            return []
+
+        response = self._get(href)
+        if response is None:
+            return []
+
+        return self._parse_booknode_author_page(response.text, author.get("name"))[:limit]
+
+    def _parse_booknode_author_page(
+        self, html: str, author_name: str | None
+    ) -> list[BookMetadata]:
+        """Extract an author's cleanly-linked books from her Booknode profile page.
+
+        Only Booknode's "latest release" / "next release" panels and her standalone
+        (non-series) books carousel put a full ``title`` attribute on the book anchor;
+        the page's series carousel links to each series as a whole (not a specific
+        book) and its activity feed links to comment permalinks, so both are skipped by
+        requiring a clean book URL (see ``_BOOKNODE_BOOK_URL_RE``) with a ``title``
+        attribute. A practical consequence: an older mid-series tome that is neither
+        the latest nor the next release may not surface here - a direct title search
+        still finds those.
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        books: list[BookMetadata] = []
+        seen: set[str] = set()
+
+        for anchor in soup.find_all("a", href=True):
+            href = str(anchor["href"])
+            if not _BOOKNODE_BOOK_URL_RE.fullmatch(href):
+                continue
+
+            title_attr = _clean_text(anchor.get("title"))
+            if not title_attr:
+                continue
+
+            slug = _booknode_slug_from_href(href)
+            if not slug or slug in seen:
+                continue
+            seen.add(slug)
+
+            cover_url = None
+            img = anchor.find("img")
+            if img is not None:
+                cover_url = img.get("data-src") or img.get("src")
+                if cover_url and str(cover_url).startswith("data:"):
+                    cover_url = img.get("data-src")
+
+            books.append(
+                self._build_booknode_book(
+                    slug=slug,
+                    name=title_attr,
+                    authors=[author_name] if author_name else [],
+                    cover_url=cover_url,
+                    source_url=href,
+                )
+            )
+
+        return books
 
     def _search_babelio(self, query: str, limit: int) -> list[BookMetadata]:
         """Best-effort Babelio search - see module docstring for the anti-bot caveat."""
@@ -458,7 +615,7 @@ def _test_booknode_connection() -> dict[str, Any]:
         provider = BabelioSearchProvider()
         response = provider.session.get(
             BOOKNODE_QUICKSEARCH_URL,
-            params={"search": "test", "option": "challenge"},
+            params={"search": "test"},
             timeout=REQUEST_TIMEOUT_SECONDS,
             verify=get_ssl_verify(BOOKNODE_BASE_URL),
         )
