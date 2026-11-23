@@ -707,6 +707,11 @@ def sync_metadata_provider_selection() -> None:
 
 # Import provider implementations to trigger registration
 # These must be imported AFTER the base classes and registry are defined
+# Fork: French providers (Booknode, Babelio), see UPDATING.md
+with suppress(ImportError):
+    from shelfmark.metadata_providers import babelio as babelio
+    from shelfmark.metadata_providers import booknode as booknode
+
 with suppress(ImportError):
     from shelfmark.metadata_providers import hardcover as hardcover
 
